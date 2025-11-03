@@ -1,0 +1,17 @@
+FROM python:3.10-slim
+
+WORKDIR /app
+
+# Install dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy application code
+COPY model_service.py .
+
+# Expose port
+EXPOSE 8000
+
+# Run the application
+CMD ["uvicorn", "model_service:app", "--host", "0.0.0.0", "--port", "8000"]
+
