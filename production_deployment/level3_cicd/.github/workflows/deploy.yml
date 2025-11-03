@@ -1,0 +1,146 @@
+name: Build and Deploy to Cloud VM
+
+# Trigger on push to main branch
+on:
+  push:
+    branches:
+      - main
+  # Allow manual trigger
+  workflow_dispatch:
+
+# Environment variables
+env:
+  DOCKER_IMAGE_NAME: house-price-api
+  DOCKER_HUB_REPO: ${{ secrets.DOCKER_HUB_USERNAME }}/house-price-api
+  VM_HOST: 74.234.179.93
+  VM_USER: ubuntu
+  VM_DIR: /home/ubuntu/gma
+  VM_PORT: 8001
+
+jobs:
+  # Job 1: Build and Push Docker Image
+  build-and-push:
+    name: Build and Push Docker Image
+    runs-on: ubuntu-latest
+    
+    steps:
+      # Step 1: Checkout code
+      - name: Checkout code
+        uses: actions/checkout@v3
+      
+      # Step 2: Set up Docker Buildx
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+      
+      # Step 3: Login to Docker Hub
+      - name: Login to Docker Hub
+        uses: docker/login-action@v2
+        with:
+          username: ${{ secrets.DOCKER_HUB_USERNAME }}
+          password: ${{ secrets.DOCKER_HUB_TOKEN }}
+      
+      # Step 4: Extract metadata (tags, labels)
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v4
+        with:
+          images: ${{ env.DOCKER_HUB_REPO }}
+          tags: |
+            type=raw,value=latest
+            type=sha,prefix={{branch}}-
+      
+      # Step 5: Build and push Docker image
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v4
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=registry,ref=${{ env.DOCKER_HUB_REPO }}:buildcache
+          cache-to: type=registry,ref=${{ env.DOCKER_HUB_REPO }}:buildcache,mode=max
+      
+      # Step 6: Image digest
+      - name: Image digest
+        run: echo "Image pushed with digest ${{ steps.meta.outputs.digest }}"
+
+  # Job 2: Deploy to Cloud VM
+  deploy:
+    name: Deploy to Cloud VM
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    
+    steps:
+      # Step 1: Checkout code (for scripts)
+      - name: Checkout code
+        uses: actions/checkout@v3
+      
+      # Step 2: Deploy to VM via SSH
+      - name: Deploy to VM
+        uses: appleboy/ssh-action@v0.1.10
+        with:
+          host: ${{ env.VM_HOST }}
+          username: ${{ env.VM_USER }}
+          password: ${{ secrets.VM_PASSWORD }}
+          port: 22
+          script: |
+            echo "=== Starting deployment ==="
+            
+            # Navigate to deployment directory
+            cd ${{ env.VM_DIR }}
+            
+            # Stop and remove old container
+            echo "Stopping old container..."
+            docker stop house-api 2>/dev/null || true
+            docker rm house-api 2>/dev/null || true
+            
+            # Pull latest image
+            echo "Pulling latest image from Docker Hub..."
+            docker pull ${{ env.DOCKER_HUB_REPO }}:latest
+            
+            # Remove old images (cleanup)
+            echo "Cleaning up old images..."
+            docker image prune -f
+            
+            # Run new container
+            echo "Starting new container..."
+            docker run -d \
+              -p ${{ env.VM_PORT }}:8000 \
+              --name house-api \
+              --restart unless-stopped \
+              ${{ env.DOCKER_HUB_REPO }}:latest
+            
+            # Wait for container to be ready
+            echo "Waiting for container to be ready..."
+            sleep 5
+            
+            # Check if container is running
+            echo "Container status:"
+            docker ps | grep house-api
+            
+            # Test the service
+            echo "Testing service..."
+            curl -f http://localhost:${{ env.VM_PORT }}/predict || echo "Service not responding yet"
+            
+            echo "=== Deployment complete ==="
+      
+      # Step 3: Verify deployment
+      - name: Verify deployment
+        run: |
+          echo "Waiting for service to be ready..."
+          sleep 10
+          
+          echo "Testing service from GitHub Actions..."
+          curl -f http://${{ env.VM_HOST }}:${{ env.VM_PORT }}/predict || exit 1
+          
+          echo "✅ Deployment verified successfully!"
+      
+      # Step 4: Notify success
+      - name: Deployment summary
+        run: |
+          echo "🎉 Deployment successful!"
+          echo "Service URL: http://${{ env.VM_HOST }}:${{ env.VM_PORT }}"
+          echo "API Docs: http://${{ env.VM_HOST }}:${{ env.VM_PORT }}/docs"
+          echo "Docker Image: ${{ env.DOCKER_HUB_REPO }}:latest"
+
